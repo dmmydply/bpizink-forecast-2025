@@ -18,21 +18,54 @@ st.set_page_config(
 # Function to load and preprocess data
 def load_data():
     try:
-        df = pd.read_excel('data dmmy mutasi gudang.xlsx')
-        # Convert tanggal to datetime
-        df['tanggal'] = pd.to_datetime(df['tanggal'], format='%d/%m/%Y')
-        return df
+        # Load zinc consumption data
+        df_zinc = pd.read_excel('data dmmy mutasi gudang.xlsx')
+        df_zinc['tanggal'] = pd.to_datetime(df_zinc['tanggal'], format='%d/%m/%Y')
+        
+        # Load production data for usage percentage calculation
+        df_prod = pd.read_excel('dmmy produksi galvaniz.xlsx')
+        df_prod['tanggal'] = pd.to_datetime(df_prod['tanggal'], format='%d/%m/%y')
+        
+        # Ensure all dates are in the correct range (2022-2024)
+        mask = df_prod['tanggal'].dt.year < 2000
+        df_prod.loc[mask, 'tanggal'] = df_prod.loc[mask, 'tanggal'] + pd.DateOffset(years=100)
+        
+        return df_zinc, df_prod
     except Exception as e:
         st.error(f"Error loading data: {str(e)}")
-        return None
+        return None, None
 
-# Function to calculate monthly aggregates
-def calculate_monthly_data(df):
+# Function to calculate monthly data
+def calculate_monthly_data(df_zinc, df_prod):
     try:
-        monthly_data = df.groupby([df['tanggal'].dt.to_period('M')]).agg({
+        # Calculate monthly zinc data
+        monthly_zinc = df_zinc.groupby(df_zinc['tanggal'].dt.to_period('M')).agg({
             'debet': 'sum',
             'kredit': 'sum'
         }).reset_index()
+        
+        # Calculate monthly production weight
+        monthly_prod = df_prod.groupby(df_prod['tanggal'].dt.to_period('M')).agg({
+            'kg_shift1': 'sum',
+            'kg_shift2': 'sum',
+            'kg_shift3': 'sum'
+        }).reset_index()
+        
+        # Calculate total production weight
+        monthly_prod['total_production'] = (
+            monthly_prod['kg_shift1'] + 
+            monthly_prod['kg_shift2'] + 
+            monthly_prod['kg_shift3']
+        )
+        
+        # Merge zinc and production data
+        monthly_data = pd.merge(
+            monthly_zinc,
+            monthly_prod[['tanggal', 'total_production']],
+            on='tanggal',
+            how='inner'
+        )
+        
         monthly_data['tanggal'] = monthly_data['tanggal'].astype(str)
         return monthly_data
     except Exception as e:
@@ -43,9 +76,9 @@ def calculate_monthly_data(df):
 def sarima_forecast(data, periods=12):
     try:
         model = SARIMAX(data, 
-                        order=(1, 1, 1),
-                        seasonal_order=(1, 1, 1, 12),
-                        enforce_stationarity=False)
+                       order=(1, 1, 1),
+                       seasonal_order=(1, 1, 1, 12),
+                       enforce_stationarity=False)
         results = model.fit()
         forecast = results.forecast(periods)
         conf_int = results.get_forecast(periods).conf_int()
@@ -59,12 +92,12 @@ def main():
     
     try:
         # Load data
-        df = load_data()
-        if df is None:
-            st.error("Failed to load data. Please check your Excel file.")
+        df_zinc, df_prod = load_data()
+        if df_zinc is None or df_prod is None:
+            st.error("Failed to load data. Please check your Excel files.")
             return
             
-        monthly_data = calculate_monthly_data(df)
+        monthly_data = calculate_monthly_data(df_zinc, df_prod)
         if monthly_data is None:
             st.error("Failed to process monthly data.")
             return
@@ -73,12 +106,12 @@ def main():
         avg_monthly_kredit = monthly_data['kredit'].mean()
         std_dev_kredit = monthly_data['kredit'].std()
         cv = (std_dev_kredit / avg_monthly_kredit) * 100
-        usage_percentage = (df['kredit'].sum() / df['debet'].sum()) * 100
 
         # Add tabs
-        tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        tab0, tab1, tab1a, tab2, tab3, tab4, tab5 = st.tabs([
             "Informasi Sistem", 
-            "Overview", 
+            "Overview",
+            "Analisis Persentase Penggunaan",
             "Analisis Detail", 
             "Forecast 2025", 
             "Rekomendasi", 
@@ -172,22 +205,20 @@ def main():
             st.header("Overview Data")
             
             # Overview metrics
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("Total Transaksi", f"{len(df):,}")
+                st.metric("Total Transaksi", f"{len(df_zinc):,} transaksi")
             with col2:
-                st.metric("Total Debet", f"{df['debet'].sum():,.2f}")
+                st.metric("Total Debet", f"{df_zinc['debet'].sum():,.2f} kg")
             with col3:
-                st.metric("Total Kredit", f"{df['kredit'].sum():,.2f}")
-            with col4:
-                st.metric("Persentase Penggunaan", f"{usage_percentage:.2f}%")
+                st.metric("Total Kredit", f"{df_zinc['kredit'].sum():,.2f} kg")
             
             # Basic info
             st.subheader("Informasi Barang")
             st.write(f"""
-            - Kode Barang: {df['nobar'].iloc[0]}
-            - Nama Barang: {df['nabar'].iloc[0]}
-            - Periode Data: {df['tanggal'].min().strftime('%d %B %Y')} - {df['tanggal'].max().strftime('%d %B %Y')}
+            - Kode Barang: {df_zinc['nobar'].iloc[0]}
+            - Nama Barang: {df_zinc['nabar'].iloc[0]}
+            - Periode Data: {df_zinc['tanggal'].min().strftime('%d %B %Y')} - {df_zinc['tanggal'].max().strftime('%d %B %Y')}
             """)
             
             # Time series plot
@@ -208,9 +239,120 @@ def main():
             fig_ts.update_layout(
                 title='Time Series Mutasi Barang',
                 xaxis_title='Periode',
-                yaxis_title='Jumlah'
+                yaxis_title='Jumlah (kg)'
             )
             st.plotly_chart(fig_ts, use_container_width=True)
+
+        with tab1a:
+            st.header("Analisis Persentase Penggunaan Zinc")
+            
+            # Metrics overview
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Rata-rata Persentase Penggunaan", f"{(monthly_data['kredit'] / monthly_data['total_production'] * 100).mean():.2f}%")
+            with col2:
+                st.metric("Persentase Tertinggi", f"{(monthly_data['kredit'] / monthly_data['total_production'] * 100).max():.2f}%")
+            with col3:
+                st.metric("Persentase Terendah", f"{(monthly_data['kredit'] / monthly_data['total_production'] * 100).min():.2f}%")
+
+            # Detailed monthly table
+            st.subheader("Detail Persentase Penggunaan per Bulan")
+            monthly_usage = pd.DataFrame({
+                'Periode': monthly_data['tanggal'],
+                'Konsumsi Zinc (kg)': monthly_data['kredit'].round(2),
+                'Berat Produksi (kg)': monthly_data['total_production'].round(2),
+                'Persentase Penggunaan (%)': (monthly_data['kredit'] / monthly_data['total_production'] * 100).round(2)
+            })
+            st.dataframe(monthly_usage.style.highlight_max(axis=0, subset=['Persentase Penggunaan (%)']), hide_index=True)
+
+            # Time series plot for usage percentage
+            st.subheader("Grafik Persentase Penggunaan Zinc")
+            fig_usage = go.Figure()
+            fig_usage.add_trace(go.Scatter(
+                x=monthly_data['tanggal'],
+                y=(monthly_data['kredit'] / monthly_data['total_production'] * 100),
+                name='Persentase Penggunaan',
+                line=dict(color='green')
+            ))
+            fig_usage.update_layout(
+                title='Tren Persentase Penggunaan Zinc terhadap Berat Produksi',
+                xaxis_title='Periode',
+                yaxis_title='Persentase (%)'
+            )
+            st.plotly_chart(fig_usage, use_container_width=True)
+
+            # Box plot for usage percentage distribution
+            st.subheader("Distribusi Persentase Penggunaan")
+            fig_dist = go.Figure()
+            fig_dist.add_trace(go.Box(
+                y=(monthly_data['kredit'] / monthly_data['total_production'] * 100),
+                name='Distribusi Persentase'
+            ))
+            fig_dist.update_layout(
+                title='Distribusi Persentase Penggunaan Zinc',
+                yaxis_title='Persentase (%)'
+            )
+            st.plotly_chart(fig_dist, use_container_width=True)
+
+            # Statistical analysis
+            st.subheader("Analisis Statistik Persentase Penggunaan")
+            col1, col2 = st.columns(2)
+            
+            percentage_series = monthly_data['kredit'] / monthly_data['total_production'] * 100
+            
+            with col1:
+                st.write("**Statistik Deskriptif:**")
+                stats_df = pd.DataFrame({
+                    'Metrik': ['Mean', 'Median', 'Standar Deviasi', 'Coefficient of Variation'],
+                    'Nilai': [
+                        f"{percentage_series.mean():.2f}%",
+                        f"{percentage_series.median():.2f}%",
+                        f"{percentage_series.std():.2f}%",
+                        f"{(percentage_series.std() / percentage_series.mean() * 100):.2f}%"
+                    ]
+                })
+                st.dataframe(stats_df, hide_index=True)
+            
+            with col2:
+                st.write("**Analisis Persentil:**")
+                percentiles_df = pd.DataFrame({
+                    'Persentil': ['25%', '50%', '75%', '90%'],
+                    'Nilai': [
+                        f"{percentage_series.quantile(0.25):.2f}%",
+                        f"{percentage_series.quantile(0.50):.2f}%",
+                        f"{percentage_series.quantile(0.75):.2f}%",
+                        f"{percentage_series.quantile(0.90):.2f}%"
+                    ]
+                })
+                st.dataframe(percentiles_df, hide_index=True)
+
+            # Monthly comparison
+            st.subheader("Perbandingan Bulanan")
+            monthly_comparison = monthly_data.copy()
+            monthly_comparison['Month'] = pd.to_datetime(monthly_comparison['tanggal']).dt.strftime('%B')
+            monthly_comparison['usage_percentage'] = monthly_comparison['kredit'] / monthly_comparison['total_production'] * 100
+            
+            # Define month order
+            month_order = ['January', 'February', 'March', 'April', 'May', 'June', 
+                         'July', 'August', 'September', 'October', 'November', 'December']
+            
+            # Calculate average by month and sort
+            monthly_avg = monthly_comparison.groupby('Month')['usage_percentage'].mean().round(2)
+            monthly_avg = monthly_avg.reindex(month_order)
+            
+            fig_monthly = go.Figure(data=[
+                go.Bar(
+                    x=monthly_avg.index,
+                    y=monthly_avg.values,
+                    name='Rata-rata Persentase'
+                )
+            ])
+            fig_monthly.update_layout(
+                title='Rata-rata Persentase Penggunaan per Bulan',
+                xaxis_title='Bulan',
+                yaxis_title='Persentase (%)'
+            )
+            st.plotly_chart(fig_monthly, use_container_width=True)
 
         with tab2:
             st.header("Analisis Detail")
@@ -218,9 +360,9 @@ def main():
             # Monthly statistics
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("Rata-rata Penggunaan Bulanan", f"{avg_monthly_kredit:,.2f}")
+                st.metric("Rata-rata Penggunaan Bulanan", f"{avg_monthly_kredit:,.2f} kg")
             with col2:
-                st.metric("Standar Deviasi Penggunaan", f"{std_dev_kredit:,.2f}")
+                st.metric("Standar Deviasi Penggunaan", f"{std_dev_kredit:,.2f} kg")
             with col3:
                 st.metric("Coefficient of Variation", f"{cv:.2f}%")
             
@@ -228,8 +370,8 @@ def main():
             st.subheader("Analisis Tren Bulanan")
             monthly_summary = pd.DataFrame({
                 'Bulan': monthly_data['tanggal'],
-                'Penggunaan': monthly_data['kredit'],
-                'Pengisian': monthly_data['debet']
+                'Penggunaan (kg)': monthly_data['kredit'].round(2),
+                'Pengisian (kg)': monthly_data['debet'].round(2)
             })
             st.dataframe(monthly_summary.style.highlight_max(axis=0), hide_index=True)
             
@@ -240,6 +382,9 @@ def main():
                 y=monthly_data['kredit'],
                 name='Distribusi Penggunaan'
             ))
+            fig_pattern.update_layout(
+                yaxis_title='Jumlah (kg)'
+            )
             st.plotly_chart(fig_pattern, use_container_width=True)
 
         with tab3:
@@ -292,19 +437,19 @@ def main():
                 fig_forecast.update_layout(
                     title='Forecast Penggunaan Barang 2025',
                     xaxis_title='Periode',
-                    yaxis_title='Jumlah'
+                    yaxis_title='Jumlah (kg)'
                 )
                 st.plotly_chart(fig_forecast, use_container_width=True)
                 
                 # Forecast details
                 st.subheader("Detail Forecast 2025")
                 forecast_details = pd.DataFrame({
-                    'Bulan': pd.date_range(start='2025-01-01', periods=12, freq='M').strftime('%B %Y'),
-                    'Prediksi': forecast,
-                    'Batas Bawah': conf_int.iloc[:, 0],
-                    'Batas Atas': conf_int.iloc[:, 1]
+                    'Bulan': forecast_df['tanggal'].dt.strftime('%B %Y'),
+                    'Prediksi (kg)': forecast.round(2),
+                    'Batas Bawah (kg)': conf_int.iloc[:, 0].round(2),
+                    'Batas Atas (kg)': conf_int.iloc[:, 1].round(2)
                 })
-                st.dataframe(forecast_details.round(2), hide_index=True)
+                st.dataframe(forecast_details, hide_index=True)
 
         with tab4:
             st.header("Rekomendasi Pengelolaan Stok")
@@ -315,34 +460,47 @@ def main():
                 with col1:
                     st.subheader("📊 Level Stok Rekomendasi")
                     st.write(f"""
-                    - **Stok Minimal:** {forecast_df['lower_bound'].mean():.2f} unit
-                    - **Stok Optimal:** {forecast_df['forecast'].mean():.2f} unit
-                    - **Stok Maksimal:** {forecast_df['upper_bound'].mean():.2f} unit
+                    - **Stok Minimal:** {forecast_df['lower_bound'].mean():.2f} kg
+                    - **Stok Optimal:** {forecast_df['forecast'].mean():.2f} kg
+                    - **Stok Maksimal:** {forecast_df['upper_bound'].mean():.2f} kg
                     """)
                 
                 with col2:
                     st.subheader("⚠️ Pengaturan Reorder")
                     st.write(f"""
-                    - **Reorder Point:** 15,000 unit
-                    - **Kuantitas Pemesanan:** 40,000 unit
-                    - **Safety Stock:** {forecast_df['lower_bound'].mean() * 0.2:.2f} unit
+                    - **Reorder Point:** 15,000 kg
+                    - **Kuantitas Pemesanan:** 40,000 kg
+                    - **Safety Stock:** {forecast_df['lower_bound'].mean() * 0.2:.2f} kg
                     """)
                 
-                st.subheader("📈 Analisis Penggunaan")
+                st.subheader("📈 Analisis Konsumsi")
+                
+                # Calculate correlation with production
+                production_correlation = monthly_data['kredit'].corr(monthly_data['total_production'])
+                
                 st.write(f"""
-                - **Usage Rate:** {usage_percentage:.2f}%
-                - **Variabilitas Penggunaan:** {cv:.2f}%
-                - **Rata-rata Penggunaan Bulanan:** {avg_monthly_kredit:,.2f} unit
+                **1. Penggunaan Zinc:**
+                - Rata-rata konsumsi bulanan: {avg_monthly_kredit:.2f} kg
+                - Standar deviasi: {std_dev_kredit:.2f} kg
+                - Koefisien variasi: {cv:.2f}%
+                
+                **2. Interpretasi Hasil:**
+                - {'Konsumsi zinc stabil' if cv < 15 else 'Konsumsi zinc cukup variabel' if cv < 25 else 'Konsumsi zinc sangat variabel'}
+                - {'Korelasi sangat baik dengan produksi' if production_correlation > 0.8 else 'Korelasi cukup baik dengan produksi' if production_correlation > 0.6 else 'Perlu evaluasi korelasi dengan produksi'}
+                
+                **3. Rekomendasi:**
+                - {'Pertahankan pola konsumsi saat ini' if cv < 15 else 'Evaluasi variabilitas konsumsi' if cv < 25 else 'Perlu standardisasi proses'}
+                - {'Monitor dan pertahankan korelasi' if production_correlation > 0.8 else 'Tingkatkan korelasi dengan produksi' if production_correlation > 0.6 else 'Evaluasi pola konsumsi vs produksi'}
                 """)
                 
-                if usage_percentage > 90:
+                if cv > 25:
                     st.warning("""
                     ⚠️ **Perhatian!**
-                    Usage rate di atas 90% menunjukkan tingkat penggunaan yang tinggi.
-                    Pertimbangkan untuk:
-                    1. Meningkatkan safety stock
-                    2. Mempercepat siklus pengisian
-                    3. Evaluasi kapasitas penyimpanan
+                    Teridentifikasi variabilitas konsumsi yang tinggi:
+                    1. Evaluasi parameter proses galvanisasi
+                    2. Periksa konsistensi ketebalan coating
+                    3. Optimalkan suhu dan waktu pencelupan
+                    4. Standardisasi prosedur operasi
                     """)
 
         with tab5:
@@ -353,7 +511,6 @@ def main():
             st.write("**1. Perhitungan Statistik Dasar**")
             st.latex(r"""
             \begin{align*}
-            \text{Usage Rate} &= \frac{\text{Total Kredit}}{\text{Total Debet}} \times 100\% \\
             \text{Average Monthly Usage} &= \frac{\sum \text{Kredit}_i}{n} \\
             \text{Standard Deviation} &= \sqrt{\frac{\sum(\text{Kredit}_i - \text{Average})^2}{n}} \\
             \text{Coefficient of Variation} &= \frac{\text{Standard Deviation}}{\text{Average}} \times 100\%
